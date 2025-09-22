@@ -174,7 +174,7 @@ jobs:
               echo "No Kubernetes cluster access - skipping cluster components"
           fi
 
-          echo "=== Installation Summary ==="
+          echo "Installation Summary"
           echo "✅ AWS CLI: $(aws --version 2>&1 | head -1)"
           echo "✅ Docker: $(docker --version 2>/dev/null || echo 'Docker installed')"
           echo "✅ kubectl: $(kubectl version --client --short 2>/dev/null || echo 'kubectl v1.28.0 installed')"
