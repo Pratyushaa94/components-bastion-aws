@@ -2,15 +2,9 @@ name: EC2 DevOps Setup Pipeline
 
 on:
   workflow_dispatch:
-    inputs:
-      cluster_endpoint:
-        description: 'Kubernetes cluster endpoint'
-        required: false
-        type: string
-      cluster_ca_cert:
-        description: 'Cluster CA certificate (base64 encoded)'
-        required: false
-        type: string
+  push:
+    branches:
+      - main
 
 jobs:
   setup-ec2:
@@ -89,20 +83,13 @@ jobs:
           sudo mv kubectl /usr/local/bin/ || exit 1
           kubectl version --client || exit 1
 
-          echo "=== Step 5: Configure kubectl (if cluster provided) ==="
-          if [[ -n "${{ inputs.cluster_endpoint }}" ]]; then
-              mkdir -p ~/.kube
-              kubectl config set-cluster main-cluster --server="${{ inputs.cluster_endpoint }}" || exit 1
-              echo "${{ inputs.cluster_ca_cert }}" | base64 -d > /tmp/ca.crt || exit 1
-              kubectl config set clusters.main-cluster.certificate-authority /tmp/ca.crt || exit 1
-              kubectl config set-context main --cluster=main-cluster || exit 1
-              kubectl config use-context main || exit 1
-              echo "Cluster configuration completed"
-              echo "Testing cluster connection..."
-              kubectl get nodes || echo "Cluster connection test failed - will retry in Step 9"
-          else
-              echo "No cluster endpoint provided, skipping kubectl configuration"
-          fi
+          echo "=== Step 5: Configure kubectl for EKS ==="
+          echo "Configuring kubectl for EKS cluster..."
+          rm -rf ~/.kube/config 2>/dev/null || true
+          aws eks update-kubeconfig --region us-east-1 --name devops-cluster || exit 1
+          echo "Testing cluster connection..."
+          kubectl get nodes || exit 1
+          echo "✅ Cluster connection successful!"
 
           echo "=== Step 6: Install/Update Helm ==="
           curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash || exit 1
@@ -127,7 +114,7 @@ jobs:
           fi
           terraform --version || exit 1
 
-          echo "=== Step 8.1: Install eksctl ==="
+          echo "=== Step 9: Install eksctl ==="
           if ! command -v eksctl >/dev/null 2>&1; then
               echo "Installing eksctl..."
               curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp || exit 1
@@ -137,10 +124,9 @@ jobs:
           fi
           eksctl version || exit 1
 
-          echo "=== Step 9: Kubernetes Components (if cluster configured) ==="
+          echo "=== Step 10: Install Kubernetes Components ==="
           if kubectl cluster-info >/dev/null 2>&1; then
-              echo "✅ Kubernetes cluster connection successful!"
-              echo "Installing NGINX Ingress Controller..."
+              echo "✅ Installing NGINX Ingress Controller..."
               kubectl create namespace ingress-nginx --dry-run=client -o yaml | kubectl apply -f - || exit 1
               helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx || exit 1
               helm repo update || exit 1
@@ -149,7 +135,7 @@ jobs:
                 --set controller.service.type=LoadBalancer \
                 --wait --timeout=300s || exit 1
 
-              echo "Installing Prometheus + Grafana..."
+              echo "✅ Installing Prometheus + Grafana..."
               kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f - || exit 1
               helm repo add prometheus-community https://prometheus-community.github.io/helm-charts || exit 1
               helm repo update || exit 1
@@ -158,7 +144,7 @@ jobs:
                 --set grafana.service.type=LoadBalancer \
                 --wait --timeout=600s || exit 1
 
-              echo "Installing ArgoCD on cluster..."
+              echo "✅ Installing ArgoCD on cluster..."
               kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f - || exit 1
               kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml || exit 1
 
@@ -166,17 +152,17 @@ jobs:
               kubectl wait --for=condition=available --timeout=600s deployment -n argocd --all || exit 1
 
               echo "=== Getting Access Information ==="
+              echo "Grafana Admin Password:"
+              kubectl get secret --namespace monitoring kube-stack-grafana -o jsonpath="{.data.admin-password}" | base64 --decode && echo
+              echo ""
               echo "ArgoCD Admin Password:"
               kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d && echo
 
-              echo "=== Verification ==="
-              echo "ArgoCD pods:" && kubectl get pods -n argocd
-              echo "Monitoring pods:" && kubectl get pods -n monitoring  
-              echo "Ingress pods:" && kubectl get pods -n ingress-nginx
+              echo "=== Service URLs (LoadBalancers) ==="
+              kubectl get svc --all-namespaces -o wide | grep LoadBalancer
           else
               echo "❌ No Kubernetes cluster access - skipping cluster components"
-              echo "Make sure to provide cluster_endpoint and cluster_ca_cert when running pipeline"
           fi
           
-          echo "=== DevOps Setup Completed Successfully ==="
+          echo "=== DevOps Pipeline Completed Successfully ==="
           REMOTE
