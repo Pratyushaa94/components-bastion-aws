@@ -1,15 +1,14 @@
 name: EC2 DevOps Setup Pipeline
 
-# Trigger manually
 on:
-  workflow_dispatch:
+  workflow_dispatch:   # Manual trigger
 
 jobs:
   setup-ec2:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Checkout repo (optional, if you need repo content)
+      # 1️⃣ Checkout repository (optional)
       - name: Checkout Repository
         uses: actions/checkout@v3
 
@@ -17,61 +16,88 @@ jobs:
       - name: Prepare SSH Key
         run: |
           mkdir -p ~/.ssh
-          # Write private key from GitHub Secrets
           echo "${{ secrets.BASTION_KEY }}" | sed 's/\\n/\n/g' > ~/.ssh/bastion.pem
           chmod 600 ~/.ssh/bastion.pem
-          # Add EC2 host to known_hosts to avoid SSH prompt
           ssh-keyscan -H ${{ secrets.BASTION_HOST }} >> ~/.ssh/known_hosts
 
-      # 3️⃣ Connect to EC2 and install tools
-      - name: Connect to EC2 and Install Tools
+      # 3️⃣ Connect to EC2 and install/check tools
+      - name: Connect to EC2 and Install/Update Tools
         run: |
           ssh -i ~/.ssh/bastion.pem \
               -o StrictHostKeyChecking=yes \
               -o UserKnownHostsFile=~/.ssh/known_hosts \
               ${{ secrets.BASTION_USER }}@${{ secrets.BASTION_HOST }} 'bash -s' <<'REMOTE'
 
-          set -euo pipefail   # Exit on error, unset variable, or pipe failure
+          set -euo pipefail
 
           echo "=== Step 1: Update packages ==="
           sudo apt-get update -y
           sudo apt-get install -y curl unzip jq git
 
-          echo "=== Step 2: Install AWS CLI ==="
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-          unzip awscliv2.zip
-          sudo ./aws/install
+          echo "=== Step 2: Install or Update AWS CLI ==="
+          if ! command -v aws >/dev/null 2>&1; then
+              echo "AWS CLI not found, installing..."
+              curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+              unzip -o awscliv2.zip
+              sudo ./aws/install
+          else
+              echo "AWS CLI already installed, updating..."
+              curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+              unzip -o awscliv2.zip
+              sudo ./aws/install --update
+          fi
           aws --version
 
-          echo "=== Step 3: Install kubectl ==="
-          # Get latest stable Kubernetes version, remove newline
+          echo "=== Step 3: Install or Update kubectl ==="
+          if ! command -v kubectl >/dev/null 2>&1; then
+              echo "kubectl not found, installing..."
+          else
+              echo "kubectl already installed, updating..."
+          fi
           KVER=$(curl -s https://dl.k8s.io/release/stable.txt | tr -d '\n')
           curl -LO "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl"
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
           kubectl version --client
 
-          echo "=== Step 4: Install Helm ==="
+          echo "=== Step 4: Install or Update Helm ==="
+          if ! command -v helm >/dev/null 2>&1; then
+              echo "Helm not found, installing..."
+          else
+              echo "Helm already installed, updating..."
+          fi
           curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
           helm version
 
-          echo "=== Step 5: Install NGINX Ingress Controller ==="
+          echo "=== Step 5: Install or Update ArgoCD CLI ==="
+          if ! command -v argocd >/dev/null 2>&1; then
+              echo "ArgoCD CLI not found, installing..."
+          else
+              echo "ArgoCD CLI already installed, updating..."
+          fi
+          VERSION=$(curl -s https://api.github.com/repos/argoproj/argo-cd/releases/latest | jq -r .tag_name)
+          curl -sSL -o argocd "https://github.com/argoproj/argo-cd/releases/download/${VERSION}/argocd-linux-amd64"
+          chmod +x argocd
+          sudo mv argocd /usr/local/bin/
+          argocd version --client
+
+          echo "=== Step 6: Install/Upgrade NGINX Ingress Controller ==="
           kubectl create namespace ingress-nginx || true
           helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
           helm repo update
-          helm install ingress-nginx ingress-nginx/ingress-nginx -n ingress-nginx || true
+          helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx -n ingress-nginx
 
-          echo "=== Step 6: Install ArgoCD ==="
-          kubectl create namespace argocd || true
-          kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-
-          echo "=== Step 7: Install Prometheus + Grafana ==="
+          echo "=== Step 7: Install/Upgrade Prometheus + Grafana ==="
           kubectl create namespace monitoring || true
           helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
           helm repo update
-          helm install kube-stack prometheus-community/kube-prometheus-stack -n monitoring || true
+          helm upgrade --install kube-stack prometheus-community/kube-prometheus-stack -n monitoring
 
-          echo "=== Step 8: Verify installation ==="
+          echo "=== Step 8: Install/Upgrade ArgoCD on Cluster ==="
+          kubectl create namespace argocd || true
+          kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+          echo "=== Step 9: Verify installations ==="
           echo "Pods in ArgoCD namespace:"
           kubectl get pods -n argocd
           echo "Pods in monitoring namespace:"
@@ -79,5 +105,5 @@ jobs:
           echo "Pods in ingress-nginx namespace:"
           kubectl get pods -n ingress-nginx
 
-          echo "=== Installation Complete ==="
-          REMOTE
+          echo "=== All installations complete ==="
+REMOTE
