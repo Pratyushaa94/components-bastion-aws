@@ -106,4 +106,4 @@ jobs:
           kubectl get pods -n ingress-nginx
 
           echo "=== All installations complete ==="
-REMOTE
+          REMOTE
