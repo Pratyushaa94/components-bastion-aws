@@ -98,6 +98,8 @@ jobs:
               kubectl config set-context main --cluster=main-cluster || exit 1
               kubectl config use-context main || exit 1
               echo "Cluster configuration completed"
+              echo "Testing cluster connection..."
+              kubectl get nodes || echo "Cluster connection test failed - will retry in Step 9"
           else
               echo "No cluster endpoint provided, skipping kubectl configuration"
           fi
@@ -137,6 +139,7 @@ jobs:
 
           echo "=== Step 9: Kubernetes Components (if cluster configured) ==="
           if kubectl cluster-info >/dev/null 2>&1; then
+              echo "✅ Kubernetes cluster connection successful!"
               echo "Installing NGINX Ingress Controller..."
               kubectl create namespace ingress-nginx --dry-run=client -o yaml | kubectl apply -f - || exit 1
               helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx || exit 1
@@ -171,7 +174,8 @@ jobs:
               echo "Monitoring pods:" && kubectl get pods -n monitoring  
               echo "Ingress pods:" && kubectl get pods -n ingress-nginx
           else
-              echo "No Kubernetes cluster access - skipping cluster components"
+              echo "❌ No Kubernetes cluster access - skipping cluster components"
+              echo "Make sure to provide cluster_endpoint and cluster_ca_cert when running pipeline"
           fi
           
           echo "=== DevOps Setup Completed Successfully ==="
