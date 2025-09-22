@@ -173,15 +173,6 @@ jobs:
           else
               echo "No Kubernetes cluster access - skipping cluster components"
           fi
-
-          echo "Installation Summary"
-          echo "✅ AWS CLI: $(aws --version 2>&1 | head -1)"
-          echo "✅ Docker: $(docker --version 2>/dev/null || echo 'Docker installed')"
-          echo "✅ kubectl: $(kubectl version --client --short 2>/dev/null || echo 'kubectl v1.28.0 installed')"
-          echo "✅ Helm: $(helm version --short)"
-          echo "✅ ArgoCD CLI: $(argocd version --client --short 2>/dev/null || echo 'ArgoCD CLI v2.8.4 installed')"
-          echo "✅ Terraform: $(terraform --version | head -1)"
-          echo "✅ eksctl: $(eksctl version)"
           
           echo "=== DevOps Setup Completed Successfully ==="
           REMOTE
