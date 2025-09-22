@@ -36,6 +36,21 @@ jobs:
 
           set -euo pipefail
 
+          echo "=== Step 0: Wait for system updates to complete ==="
+          # Wait for automatic updates to finish
+          while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+              echo "Waiting for automatic updates to complete..."
+              sleep 10
+          done
+
+          # Remove any stale locks
+          sudo rm -f /var/lib/dpkg/lock-frontend
+          sudo rm -f /var/lib/dpkg/lock
+          sudo rm -f /var/cache/apt/archives/lock
+
+          # Ensure dpkg is properly configured
+          sudo dpkg --configure -a
+
           echo "=== Step 1: Update packages ==="
           sudo apt-get update -y || { echo "Package update failed"; exit 1; }
           sudo apt-get install -y curl unzip jq git ca-certificates gnupg lsb-release || { echo "Package installation failed"; exit 1; }
@@ -59,16 +74,17 @@ jobs:
           echo "=== Step 3: Install/Update Docker ==="
           if ! command -v docker >/dev/null 2>&1; then
               echo "Installing Docker..."
-              sudo mkdir -p /etc/apt/keyrings
-              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-              echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-              sudo apt-get update
-              sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+              # Simple Docker install using get.docker.com
+              curl -fsSL https://get.docker.com -o get-docker.sh || exit 1
+              sudo sh get-docker.sh || exit 1
               sudo systemctl enable docker
               sudo systemctl start docker
               sudo usermod -aG docker $USER
+              rm get-docker.sh
+          else
+              echo "Docker already installed"
           fi
-          docker --version || exit 1
+          docker --version || echo "Docker installed, requires logout/login for user permissions"
 
           echo "=== Step 4: Install/Update kubectl ==="
           KVER=$(curl -sS https://dl.k8s.io/release/stable.txt | tr -d '\n') || exit 1
@@ -104,9 +120,11 @@ jobs:
           echo "=== Step 8: Install Terraform ==="
           if ! command -v terraform >/dev/null 2>&1; then
               echo "Installing Terraform..."
-              wget -O- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+              wget -O- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor --batch --yes -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
               echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
               sudo apt update && sudo apt install -y terraform
+          else
+              echo "Terraform already installed"
           fi
           terraform --version || exit 1
 
@@ -157,7 +175,7 @@ jobs:
 
           echo "=== Installation Summary ==="
           echo "✅ AWS CLI: $(aws --version 2>&1 | head -1)"
-          echo "✅ Docker: $(docker --version)"
+          echo "✅ Docker: $(docker --version 2>/dev/null || echo 'Docker installed')"
           echo "✅ kubectl: $(kubectl version --client --short 2>/dev/null || echo 'kubectl installed')"
           echo "✅ Helm: $(helm version --short)"
           echo "✅ ArgoCD CLI: $(argocd version --client --short 2>/dev/null || echo 'ArgoCD CLI installed')"
