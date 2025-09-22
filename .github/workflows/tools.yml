@@ -82,7 +82,6 @@ jobs:
           docker --version || echo "Docker installed, requires logout/login for user permissions"
 
           echo "=== Step 4: Install/Update kubectl ==="
-          # FIXED: Use specific version instead of dynamic lookup
           KUBECTL_VERSION="v1.28.0"
           echo "Installing kubectl version ${KUBECTL_VERSION}..."
           curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" || exit 1
@@ -108,7 +107,6 @@ jobs:
           helm version || exit 1
 
           echo "=== Step 7: Install/Update ArgoCD CLI ==="
-          # FIXED: Use direct download instead of API lookup
           echo "Installing ArgoCD CLI..."
           ARGOCD_VERSION="v2.8.4"
           curl -sSL -o argocd "https://github.com/argoproj/argo-cd/releases/download/${ARGOCD_VERSION}/argocd-linux-amd64" || exit 1
