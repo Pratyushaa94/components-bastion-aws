@@ -1,109 +1,167 @@
 name: EC2 DevOps Setup Pipeline
 
 on:
-  workflow_dispatch:   # Manual trigger
+  workflow_dispatch:
+    inputs:
+      cluster_endpoint:
+        description: 'Kubernetes cluster endpoint'
+        required: false
+        type: string
+      cluster_ca_cert:
+        description: 'Cluster CA certificate (base64 encoded)'
+        required: false
+        type: string
 
 jobs:
   setup-ec2:
     runs-on: ubuntu-latest
-
+    
     steps:
-      # 1️⃣ Checkout repository (optional)
       - name: Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      # 2️⃣ Prepare SSH key for EC2
       - name: Prepare SSH Key
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.BASTION_KEY }}" | sed 's/\\n/\n/g' > ~/.ssh/bastion.pem
+          echo "${{ secrets.BASTION_KEY }}" | tr -d '\r' | sed 's/\\n/\n/g' > ~/.ssh/bastion.pem
           chmod 600 ~/.ssh/bastion.pem
-          ssh-keyscan -H ${{ secrets.BASTION_HOST }} >> ~/.ssh/known_hosts
+          ssh-keyscan -H ${{ secrets.BASTION_HOST }} >> ~/.ssh/known_hosts || exit 1
 
-      # 3️⃣ Connect to EC2 and install/check tools
-      - name: Connect to EC2 and Install/Update Tools
+      - name: Setup DevOps Tools on EC2
         run: |
           ssh -i ~/.ssh/bastion.pem \
               -o StrictHostKeyChecking=yes \
-              -o UserKnownHostsFile=~/.ssh/known_hosts \
+              -o ConnectTimeout=30 \
               ${{ secrets.BASTION_USER }}@${{ secrets.BASTION_HOST }} 'bash -s' <<'REMOTE'
 
           set -euo pipefail
 
           echo "=== Step 1: Update packages ==="
-          sudo apt-get update -y
-          sudo apt-get install -y curl unzip jq git
+          sudo apt-get update -y || { echo "Package update failed"; exit 1; }
+          sudo apt-get install -y curl unzip jq git ca-certificates gnupg lsb-release || { echo "Package installation failed"; exit 1; }
 
-          echo "=== Step 2: Install or Update AWS CLI ==="
+          echo "=== Step 2: Install/Update AWS CLI ==="
           if ! command -v aws >/dev/null 2>&1; then
-              echo "AWS CLI not found, installing..."
-              curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-              unzip -o awscliv2.zip
-              sudo ./aws/install
+              echo "Installing AWS CLI..."
+              curl -sS "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" || exit 1
+              unzip -oq awscliv2.zip || exit 1
+              sudo ./aws/install || exit 1
+              rm -rf aws awscliv2.zip
           else
-              echo "AWS CLI already installed, updating..."
-              curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-              unzip -o awscliv2.zip
-              sudo ./aws/install --update
+              echo "Updating AWS CLI..."
+              curl -sS "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" || exit 1
+              unzip -oq awscliv2.zip || exit 1  
+              sudo ./aws/install --update || exit 1
+              rm -rf aws awscliv2.zip
           fi
-          aws --version
+          aws --version || exit 1
 
-          echo "=== Step 3: Install or Update kubectl ==="
-          if ! command -v kubectl >/dev/null 2>&1; then
-              echo "kubectl not found, installing..."
-          else
-              echo "kubectl already installed, updating..."
+          echo "=== Step 3: Install/Update Docker ==="
+          if ! command -v docker >/dev/null 2>&1; then
+              echo "Installing Docker..."
+              sudo mkdir -p /etc/apt/keyrings
+              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+              echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+              sudo apt-get update
+              sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+              sudo systemctl enable docker
+              sudo systemctl start docker
+              sudo usermod -aG docker $USER
           fi
-          KVER=$(curl -s https://dl.k8s.io/release/stable.txt | tr -d '\n')
-          curl -LO "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl"
+          docker --version || exit 1
+
+          echo "=== Step 4: Install/Update kubectl ==="
+          KVER=$(curl -sS https://dl.k8s.io/release/stable.txt | tr -d '\n') || exit 1
+          curl -sSOL "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl" || exit 1
           chmod +x kubectl
-          sudo mv kubectl /usr/local/bin/
-          kubectl version --client
+          sudo mv kubectl /usr/local/bin/ || exit 1
+          kubectl version --client || exit 1
 
-          echo "=== Step 4: Install or Update Helm ==="
-          if ! command -v helm >/dev/null 2>&1; then
-              echo "Helm not found, installing..."
+          echo "=== Step 5: Configure kubectl (if cluster provided) ==="
+          if [[ -n "${{ inputs.cluster_endpoint }}" ]]; then
+              mkdir -p ~/.kube
+              kubectl config set-cluster main-cluster --server="${{ inputs.cluster_endpoint }}" || exit 1
+              echo "${{ inputs.cluster_ca_cert }}" | base64 -d > /tmp/ca.crt || exit 1
+              kubectl config set clusters.main-cluster.certificate-authority /tmp/ca.crt || exit 1
+              kubectl config set-context main --cluster=main-cluster || exit 1
+              kubectl config use-context main || exit 1
+              echo "Cluster configuration completed"
           else
-              echo "Helm already installed, updating..."
+              echo "No cluster endpoint provided, skipping kubectl configuration"
           fi
-          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-          helm version
 
-          echo "=== Step 5: Install or Update ArgoCD CLI ==="
-          if ! command -v argocd >/dev/null 2>&1; then
-              echo "ArgoCD CLI not found, installing..."
-          else
-              echo "ArgoCD CLI already installed, updating..."
-          fi
-          VERSION=$(curl -s https://api.github.com/repos/argoproj/argo-cd/releases/latest | jq -r .tag_name)
-          curl -sSL -o argocd "https://github.com/argoproj/argo-cd/releases/download/${VERSION}/argocd-linux-amd64"
+          echo "=== Step 6: Install/Update Helm ==="
+          curl -sS https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash || exit 1
+          helm version || exit 1
+
+          echo "=== Step 7: Install/Update ArgoCD CLI ==="
+          VERSION=$(curl -sS https://api.github.com/repos/argoproj/argo-cd/releases/latest | jq -r .tag_name) || exit 1
+          curl -sSL -o argocd "https://github.com/argoproj/argo-cd/releases/download/${VERSION}/argocd-linux-amd64" || exit 1
           chmod +x argocd
-          sudo mv argocd /usr/local/bin/
-          argocd version --client
+          sudo mv argocd /usr/local/bin/ || exit 1
+          argocd version --client || exit 1
 
-          echo "=== Step 6: Install/Upgrade NGINX Ingress Controller ==="
-          kubectl create namespace ingress-nginx || true
-          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
-          helm repo update
-          helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx -n ingress-nginx
+          echo "=== Step 8: Install Terraform ==="
+          if ! command -v terraform >/dev/null 2>&1; then
+              echo "Installing Terraform..."
+              wget -O- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+              echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+              sudo apt update && sudo apt install -y terraform
+          fi
+          terraform --version || exit 1
 
-          echo "=== Step 7: Install/Upgrade Prometheus + Grafana ==="
-          kubectl create namespace monitoring || true
-          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-          helm repo update
-          helm upgrade --install kube-stack prometheus-community/kube-prometheus-stack -n monitoring
+          echo "=== Step 9: Kubernetes Components (if cluster configured) ==="
+          if kubectl cluster-info >/dev/null 2>&1; then
+              echo "Installing NGINX Ingress Controller..."
+              kubectl create namespace ingress-nginx --dry-run=client -o yaml | kubectl apply -f - || exit 1
+              helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx || exit 1
+              helm repo update || exit 1
+              helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+                -n ingress-nginx \
+                --set controller.service.type=LoadBalancer \
+                --wait --timeout=300s || exit 1
 
-          echo "=== Step 8: Install/Upgrade ArgoCD on Cluster ==="
-          kubectl create namespace argocd || true
-          kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+              echo "Installing Prometheus + Grafana..."
+              kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f - || exit 1
+              helm repo add prometheus-community https://prometheus-community.github.io/helm-charts || exit 1
+              helm repo update || exit 1
+              helm upgrade --install kube-stack prometheus-community/kube-prometheus-stack \
+                -n monitoring \
+                --set grafana.service.type=LoadBalancer \
+                --wait --timeout=600s || exit 1
 
-          echo "=== Step 9: Verify installations ==="
-          echo "Pods in ArgoCD namespace:"
-          kubectl get pods -n argocd
-          echo "Pods in monitoring namespace:"
-          kubectl get pods -n monitoring
-          echo "Pods in ingress-nginx namespace:"
-          kubectl get pods -n ingress-nginx
+              echo "Installing ArgoCD on cluster..."
+              kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f - || exit 1
+              kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml || exit 1
 
-          echo "=== All installations complete ==="
+              echo "Waiting for deployments..."
+              kubectl wait --for=condition=available --timeout=600s deployment -n argocd --all || exit 1
+              kubectl wait --for=condition=available --timeout=300s deployment -n monitoring --all || exit 1
+              kubectl wait --for=condition=available --timeout=300s deployment -n ingress-nginx --all || exit 1
+
+              echo "=== Getting Access Information ==="
+              echo "ArgoCD Admin Password:"
+              kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d && echo
+              
+              echo "Service URLs (if using LoadBalancer):"
+              kubectl get svc -n argocd argocd-server -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{.status.loadBalancer.ingress[0].ip}' && echo
+              kubectl get svc -n monitoring kube-stack-grafana -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{.status.loadBalancer.ingress[0].ip}' && echo
+
+              echo "=== Verification ==="
+              echo "ArgoCD pods:" && kubectl get pods -n argocd
+              echo "Monitoring pods:" && kubectl get pods -n monitoring  
+              echo "Ingress pods:" && kubectl get pods -n ingress-nginx
+          else
+              echo "No Kubernetes cluster access - skipping cluster components"
+          fi
+
+          echo "=== Installation Summary ==="
+          echo "✅ AWS CLI: $(aws --version 2>&1 | head -1)"
+          echo "✅ Docker: $(docker --version)"
+          echo "✅ kubectl: $(kubectl version --client --short 2>/dev/null || echo 'kubectl installed')"
+          echo "✅ Helm: $(helm version --short)"
+          echo "✅ ArgoCD CLI: $(argocd version --client --short 2>/dev/null || echo 'ArgoCD CLI installed')"
+          echo "✅ Terraform: $(terraform --version | head -1)"
+          
+          echo "=== DevOps Setup Completed Successfully ==="
           REMOTE
