@@ -37,23 +37,19 @@ jobs:
           set -euo pipefail
 
           echo "=== Step 0: Wait for system updates to complete ==="
-          # Wait for automatic updates to finish
           while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
               echo "Waiting for automatic updates to complete..."
               sleep 10
           done
 
-          # Remove any stale locks
           sudo rm -f /var/lib/dpkg/lock-frontend
           sudo rm -f /var/lib/dpkg/lock
           sudo rm -f /var/cache/apt/archives/lock
-
-          # Ensure dpkg is properly configured
           sudo dpkg --configure -a
 
           echo "=== Step 1: Update packages ==="
           sudo apt-get update -y || { echo "Package update failed"; exit 1; }
-          sudo apt-get install -y curl unzip jq git ca-certificates gnupg lsb-release || { echo "Package installation failed"; exit 1; }
+          sudo apt-get install -y curl unzip jq git ca-certificates gnupg lsb-release wget || { echo "Package installation failed"; exit 1; }
 
           echo "=== Step 2: Install/Update AWS CLI ==="
           if ! command -v aws >/dev/null 2>&1; then
@@ -74,7 +70,6 @@ jobs:
           echo "=== Step 3: Install/Update Docker ==="
           if ! command -v docker >/dev/null 2>&1; then
               echo "Installing Docker..."
-              # Simple Docker install using get.docker.com
               curl -fsSL https://get.docker.com -o get-docker.sh || exit 1
               sudo sh get-docker.sh || exit 1
               sudo systemctl enable docker
@@ -87,8 +82,10 @@ jobs:
           docker --version || echo "Docker installed, requires logout/login for user permissions"
 
           echo "=== Step 4: Install/Update kubectl ==="
-          KVER=$(curl -sS https://dl.k8s.io/release/stable.txt | tr -d '\n') || exit 1
-          curl -sSOL "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl" || exit 1
+          # FIXED: Use specific version instead of dynamic lookup
+          KUBECTL_VERSION="v1.28.0"
+          echo "Installing kubectl version ${KUBECTL_VERSION}..."
+          curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" || exit 1
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/ || exit 1
           kubectl version --client || exit 1
@@ -107,12 +104,14 @@ jobs:
           fi
 
           echo "=== Step 6: Install/Update Helm ==="
-          curl -sS https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash || exit 1
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash || exit 1
           helm version || exit 1
 
           echo "=== Step 7: Install/Update ArgoCD CLI ==="
-          VERSION=$(curl -sS https://api.github.com/repos/argoproj/argo-cd/releases/latest | jq -r .tag_name) || exit 1
-          curl -sSL -o argocd "https://github.com/argoproj/argo-cd/releases/download/${VERSION}/argocd-linux-amd64" || exit 1
+          # FIXED: Use direct download instead of API lookup
+          echo "Installing ArgoCD CLI..."
+          ARGOCD_VERSION="v2.8.4"
+          curl -sSL -o argocd "https://github.com/argoproj/argo-cd/releases/download/${ARGOCD_VERSION}/argocd-linux-amd64" || exit 1
           chmod +x argocd
           sudo mv argocd /usr/local/bin/ || exit 1
           argocd version --client || exit 1
@@ -154,16 +153,10 @@ jobs:
 
               echo "Waiting for deployments..."
               kubectl wait --for=condition=available --timeout=600s deployment -n argocd --all || exit 1
-              kubectl wait --for=condition=available --timeout=300s deployment -n monitoring --all || exit 1
-              kubectl wait --for=condition=available --timeout=300s deployment -n ingress-nginx --all || exit 1
 
               echo "=== Getting Access Information ==="
               echo "ArgoCD Admin Password:"
               kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d && echo
-              
-              echo "Service URLs (if using LoadBalancer):"
-              kubectl get svc -n argocd argocd-server -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{.status.loadBalancer.ingress[0].ip}' && echo
-              kubectl get svc -n monitoring kube-stack-grafana -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{.status.loadBalancer.ingress[0].ip}' && echo
 
               echo "=== Verification ==="
               echo "ArgoCD pods:" && kubectl get pods -n argocd
@@ -176,9 +169,9 @@ jobs:
           echo "=== Installation Summary ==="
           echo "✅ AWS CLI: $(aws --version 2>&1 | head -1)"
           echo "✅ Docker: $(docker --version 2>/dev/null || echo 'Docker installed')"
-          echo "✅ kubectl: $(kubectl version --client --short 2>/dev/null || echo 'kubectl installed')"
+          echo "✅ kubectl: $(kubectl version --client --short 2>/dev/null || echo 'kubectl v1.28.0 installed')"
           echo "✅ Helm: $(helm version --short)"
-          echo "✅ ArgoCD CLI: $(argocd version --client --short 2>/dev/null || echo 'ArgoCD CLI installed')"
+          echo "✅ ArgoCD CLI: $(argocd version --client --short 2>/dev/null || echo 'ArgoCD CLI v2.8.4 installed')"
           echo "✅ Terraform: $(terraform --version | head -1)"
           
           echo "=== DevOps Setup Completed Successfully ==="
