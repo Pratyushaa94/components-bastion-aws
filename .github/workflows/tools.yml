@@ -1,0 +1,71 @@
+name: EC2 DevOps Setup Pipeline
+
+on:
+  workflow_dispatch:   # run manually
+
+jobs:
+  setup-ec2:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout repository (if needed)
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+
+      # 2. Prepare SSH key
+      - name: Prepare SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.BASTION_KEY }}" | sed 's/\\n/\n/g' > ~/.ssh/bastion.pem
+          chmod 600 ~/.ssh/bastion.pem
+          ssh-keyscan -H ${{ secrets.BASTION_HOST }} >> ~/.ssh/known_hosts
+
+      # 3. Connect to EC2 and install tools
+      - name: Connect to EC2 and Install Tools
+        run: |
+          ssh -i ~/.ssh/bastion.pem \
+              -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile=~/.ssh/known_hosts \
+              ${{ secrets.BASTION_USER }}@${{ secrets.BASTION_HOST }} 'bash -s' <<'REMOTE'
+
+          set -euo pipefail
+
+          echo "=== Update packages ==="
+          sudo apt-get update -y
+          sudo apt-get install -y curl unzip jq git
+
+          echo "=== Install AWS CLI ==="
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          sudo ./aws/install
+          aws --version
+
+          echo "=== Install kubectl ==="
+          KVER=$(curl -s https://dl.k8s.io/release/stable.txt)
+          curl -LO "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+          kubectl version --client
+
+          echo "=== Install Helm ==="
+          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          helm version
+
+          echo "=== Install NGINX Ingress Controller ==="
+          kubectl create namespace ingress-nginx || true
+          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+          helm repo update
+          helm install ingress-nginx ingress-nginx/ingress-nginx -n ingress-nginx || true
+
+          echo "=== Install ArgoCD ==="
+          kubectl create namespace argocd || true
+          kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+          echo "=== Install Prometheus + Grafana ==="
+          kubectl create namespace monitoring || true
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo update
+          helm install kube-stack prometheus-community/kube-prometheus-stack -n monitoring || true
+
+          echo "=== Installation Complete ==="
+          REMOTE
